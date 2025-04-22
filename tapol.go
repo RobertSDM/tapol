@@ -35,6 +35,39 @@ func buildHeader(header Header, url *url.URL, body []byte) Header {
 	return header
 }
 
+func parseResponse(conn net.Conn) (resp Response) {
+	scanner := bufio.NewScanner(conn)
+
+	resp = Response{}
+	httpheader := false
+	resp.Header = Header{}
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			break
+		}
+
+		if !httpheader {
+			status := strings.Split(line, " ")[1:]
+			resp.Status = strings.Join(status, " ")
+			code, _ := strconv.Atoi(status[0])
+			resp.StatusCode = int16(code)
+
+			if resp.StatusCode == 200 {
+				resp.Ok = true
+			}
+
+			httpheader = true
+		} else {
+			headerline := strings.Split(line, ": ")
+			resp.Header.Add(HTTPHeader(headerline[0]), headerline[1])
+		}
+	}
+
+	return resp
+}
+
 func NewRequest(method string, ogurl string, header *Header, body []byte) (resp Response, err error) {
 	url, _ := url.Parse(ogurl)
 	if err != nil {
@@ -60,51 +93,22 @@ func NewRequest(method string, ogurl string, header *Header, body []byte) (resp 
 	req := request.Build()
 	fmt.Fprintln(conn, req)
 
-	scanner := bufio.NewScanner(conn)
-
-	resp = Response{}
-	httpheader := false
-	respheader := Header{}
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			break
-		}
-
-		if !httpheader {
-			status := strings.Split(line, " ")[1:]
-			resp.Status = strings.Join(status, " ")
-			code, _ := strconv.Atoi(status[0])
-			resp.StatusCode = int16(code)
-
-			if resp.StatusCode == 200 {
-				resp.Ok = true
-			}
-
-			httpheader = true
-		} else {
-			headerline := strings.Split(line, ": ")
-			respheader.Add(HTTPHeader(headerline[0]), headerline[1])
-		}
-	}
-
-	resp.Header = respheader
+	resp = parseResponse(conn)
 
 	// Redirecting the request
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		return NewRequest(method, respheader.Get(Location), header, body)
+		return NewRequest(method, resp.Header.Get(Location), header, body)
 	}
 
-	bodylength, err := strconv.Atoi(resp.Header.Get(ContentLength))
-	if err == nil && bodylength > 0 {
-		respBody := ""
-		for scanner.Scan() {
-			respBody += scanner.Text()
-		}
+	// bodylength, err := strconv.Atoi(resp.Header.Get(ContentLength))
+	// if err == nil && bodylength > 0 {
+	// 	respBody := ""
+	// 	for scanner.Scan() {
+	// 		respBody += scanner.Text()
+	// 	}
 
-		resp.Body = respBody
-	}
+	// 	resp.Body = respBody
+	// }
 
 	return resp, nil
 }
