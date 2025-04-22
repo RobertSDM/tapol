@@ -16,6 +16,7 @@ var (
 	Accept        HTTPHeader = "Accept"
 	ContentLength HTTPHeader = "Content-Length"
 	ContentType   HTTPHeader = "Content-Type"
+	Location      HTTPHeader = "Location"
 )
 
 func (h *Header) Add(key HTTPHeader, value string) (err error) {
@@ -32,7 +33,7 @@ func (h *Header) Add(key HTTPHeader, value string) (err error) {
 	return nil
 }
 
-func (h *Header) Change(key HTTPHeader, value string) (err error) {
+func (h *Header) change(key HTTPHeader, value string) (err error) {
 	if value == "" {
 		return errors.New("the value cannot be null")
 	}
@@ -95,7 +96,7 @@ func (r Request) String() (str string) {
 }
 
 type Response struct {
-	StatusCode string
+	StatusCode int16
 	Status     string
 	Header     Header
 	Body       string
