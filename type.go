@@ -3,6 +3,7 @@ package tapol
 import (
 	"errors"
 	"fmt"
+	"io"
 )
 
 type (
@@ -66,7 +67,7 @@ var HTTPversion = "1.1"
 type Request struct {
 	Body   []byte
 	Host   string
-	Header Header
+	Header *Header
 	Path   string
 	Method string
 }
@@ -78,7 +79,7 @@ func (r *Request) Build() (request string) {
 	HTTPFormedRequest += fmt.Sprintf("%s %s HTTP/%s\r\n", r.Method, r.Path, HTTPversion)
 
 	// Adding the request headers
-	for k, v := range r.Header {
+	for k, v := range *r.Header {
 		HTTPFormedRequest += fmt.Sprintf("%s: %s\r\n", k, v)
 	}
 
@@ -99,6 +100,6 @@ type Response struct {
 	StatusCode int16
 	Status     string
 	Header     Header
-	Body       string
+	Body       io.ReadCloser
 	Ok         bool
 }

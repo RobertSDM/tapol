@@ -4,17 +4,18 @@ import (
 	"bufio"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"strconv"
 	"strings"
 )
 
-func createConn(url *url.URL) (conn net.Conn, err error) {
-	if url.Scheme == "http" {
-		conn, err = connect(fmt.Sprintf("%s:%d", (*url).Host, 80))
+func createConn(schema, url string) (conn net.Conn, err error) {
+	if schema == "http" {
+		conn, err = connect(url)
 	} else {
-		conn, err = connectTLS(fmt.Sprintf("%s:%d", (*url).Host, 443))
+		conn, err = connectTLS(url)
 	}
 
 	if err != nil {
@@ -24,8 +25,34 @@ func createConn(url *url.URL) (conn net.Conn, err error) {
 	return conn, nil
 }
 
-func buildHeader(header Header, url *url.URL, body []byte) Header {
-	header.change(Host, url.Host)
+func parseURL(rawURL string) (schema, host, path string, err error) {
+	parsedURL, err := url.Parse(rawURL)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	schema = parsedURL.Scheme
+	host = parsedURL.Host
+
+	if !strings.Contains(host, ":") {
+		switch schema {
+		case "http":
+			host += ":80"
+		default:
+			host += ":443"
+		}
+	}
+
+	path = parsedURL.Path
+	if path == "" {
+		path = "/"
+	}
+
+	return schema, host, path, nil
+}
+
+func buildHeader(header *Header, host string, body []byte) *Header {
+	header.change(Host, host)
 	header.change(Connection, "close")
 
 	if body != nil {
@@ -35,98 +62,107 @@ func buildHeader(header Header, url *url.URL, body []byte) Header {
 	return header
 }
 
-func parseResponse(conn net.Conn) (resp Response) {
-	scanner := bufio.NewScanner(conn)
-
+func parseRespHeader(reader *bufio.Reader) (resp Response, err error) {
 	resp = Response{}
-	httpheader := false
 	resp.Header = Header{}
 
-	for scanner.Scan() {
-		line := scanner.Text()
+	line, _ := reader.ReadString('\n')
+	line = strings.TrimSpace(line)
+
+	status := strings.Fields(strings.TrimSpace(line))[1:]
+	resp.Status = strings.Join(status, " ")
+	code, _ := strconv.Atoi(status[0])
+	resp.StatusCode = int16(code)
+
+	if resp.StatusCode == 200 {
+		resp.Ok = true
+	}
+
+	for {
+		line, err := reader.ReadString('\n')
+		line = strings.TrimSpace(line)
+		if err == io.EOF {
+			break
+		}
+
+		if err != nil {
+			return Response{}, err
+		}
+
 		if line == "" {
 			break
 		}
 
-		if !httpheader {
-			status := strings.Split(line, " ")[1:]
-			resp.Status = strings.Join(status, " ")
-			code, _ := strconv.Atoi(status[0])
-			resp.StatusCode = int16(code)
-
-			if resp.StatusCode == 200 {
-				resp.Ok = true
-			}
-
-			httpheader = true
-		} else {
-			headerline := strings.Split(line, ": ")
+		headerline := strings.SplitN(line, ": ", 2)
+		if len(headerline) > 1 {
 			resp.Header.Add(HTTPHeader(headerline[0]), headerline[1])
 		}
 	}
 
-	return resp
+	return resp, nil
 }
 
-func NewRequest(method string, ogurl string, header *Header, body []byte) (resp Response, err error) {
-	url, _ := url.Parse(ogurl)
+func makeRequest(method string, rawURL string, header *Header, body []byte) (resp Response, err error) {
+	schema, host, path, err := parseURL(rawURL)
 	if err != nil {
 		return Response{}, err
 	}
 
-	conn, err := createConn(url)
+	conn, err := createConn(schema, host)
 	if err != nil {
 		return Response{}, err
 	}
-	defer conn.Close()
+	// defer conn.Close()
 
-	request := Request{}
-	request.Host = url.Host
-	request.Header = buildHeader(*header, url, nil)
-	request.Method = method
-
-	request.Path = url.Path
-	if url.Path == "" {
-		request.Path = "/"
+	request := Request{
+		Host:   host,
+		Header: buildHeader(header, host, body),
+		Method: method,
+		Path:   path,
 	}
 
-	req := request.Build()
-	fmt.Fprintln(conn, req)
+	fmt.Fprintln(conn, request.Build())
 
-	resp = parseResponse(conn)
+	reader := bufio.NewReader(conn)
+	resp, err = parseRespHeader(reader)
+	if err != nil {
+		return resp, err
+	}
 
-	// Redirecting the request
+	// A redirection of any status 3xx will lead in another request for now
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		return NewRequest(method, resp.Header.Get(Location), header, body)
+		return makeRequest(method, resp.Header.Get(Location), header, body)
 	}
 
-	// bodylength, err := strconv.Atoi(resp.Header.Get(ContentLength))
-	// if err == nil && bodylength > 0 {
-	// 	respBody := ""
-	// 	for scanner.Scan() {
-	// 		respBody += scanner.Text()
-	// 	}
+	contentlength := resp.Header.Get(ContentLength)
 
-	// 	resp.Body = respBody
-	// }
+	if contentlength == "" {
+		resp.Body = io.NopCloser(strings.NewReader(""))
+	} else {
+		bodylength, err := strconv.Atoi(contentlength)
+		if err != nil {
+			return Response{}, err
+		}
+		resp.Body = io.NopCloser(io.LimitReader(bufio.NewReader(reader), int64(bodylength)))
+	}
 
 	return resp, nil
 }
 
 func Get(url string, header *Header) (resp Response, err error) {
-	return NewRequest("GET", url, header, nil)
+	return makeRequest("GET", url, header, nil)
 }
 
 func Post(url string, header *Header, body []byte) (resp Response, err error) {
-	return NewRequest("POST", url, header, body)
+	return makeRequest("POST", url, header, body)
 }
 
 func Put(url string, header *Header, body []byte) (resp Response, err error) {
-	return NewRequest("PUT", url, header, body)
+	return makeRequest("PUT", url, header, body)
 }
 
 func Delete(url string, header *Header) (resp Response, err error) {
-	return NewRequest("DELETE", url, header, nil)
+	return makeRequest("DELETE", url, header, nil)
 }
 
 func connectTLS(host string) (net.Conn, error) {
