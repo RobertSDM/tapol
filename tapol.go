@@ -11,6 +11,13 @@ import (
 	"strings"
 )
 
+
+func newChunkedReader(r io.Reader) *chunkedReader {
+	return &chunkedReader{
+		r: bufio.NewReader(r),
+	}
+}
+
 func createConn(schema, url string) (conn net.Conn, err error) {
 	if schema == "http" {
 		conn, err = connect(url)
@@ -52,11 +59,11 @@ func parseURL(rawURL string) (schema, host, path string, err error) {
 }
 
 func buildHeader(header *Header, host string, body []byte) *Header {
-	header.change(Host, host)
-	header.change(Connection, "close")
+	header.change("Host", host)
+	header.change("Connection", "close")
 
 	if body != nil {
-		header.change(ContentLength, fmt.Sprint(len(body)))
+		header.change("Content-Length", fmt.Sprint(len(body)))
 	}
 
 	return header
@@ -80,7 +87,6 @@ func parseRespHeader(reader *bufio.Reader) (resp Response, err error) {
 
 	for {
 		line, err := reader.ReadString('\n')
-		line = strings.TrimSpace(line)
 		if err == io.EOF {
 			break
 		}
@@ -89,13 +95,15 @@ func parseRespHeader(reader *bufio.Reader) (resp Response, err error) {
 			return Response{}, err
 		}
 
+		line = strings.TrimSpace(line)
+
 		if line == "" {
 			break
 		}
 
 		headerline := strings.SplitN(line, ": ", 2)
 		if len(headerline) > 1 {
-			resp.Header.Add(HTTPHeader(headerline[0]), headerline[1])
+			resp.Header.Add(headerline[0], headerline[1])
 		}
 	}
 
@@ -131,20 +139,31 @@ func makeRequest(method string, rawURL string, header *Header, body []byte) (res
 
 	// A redirection of any status 3xx will lead in another request for now
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		return makeRequest(method, resp.Header.Get(Location), header, body)
+		return makeRequest(method, resp.Header.Get("Location"), header, body)
 	}
 
-	contentlength := resp.Header.Get(ContentLength)
+	var bodyreader io.Reader
+	contentlength := resp.Header.Get("Content-Length")
+	transfercontent := resp.Header.Get("Transfer-Encoding")
 
-	if contentlength == "" {
-		resp.Body = io.NopCloser(strings.NewReader(""))
-	} else {
+	if contentlength == "" && transfercontent != "" {
+		bodyreader = conn
+
+		switch transfercontent {
+		case "chunked":
+			bodyreader = newChunkedReader(bodyreader)
+		}
+
+	} else if contentlength == "" && transfercontent == "" {
+		bodyreader = strings.NewReader("")
+	} else if contentlength != "" && transfercontent == "" {
 		bodylength, err := strconv.Atoi(contentlength)
 		if err != nil {
 			return Response{}, err
 		}
-		resp.Body = io.NopCloser(io.LimitReader(bufio.NewReader(reader), int64(bodylength)))
+		bodyreader = io.LimitReader(bufio.NewReader(reader), int64(bodylength))
 	}
+	resp.Body = io.NopCloser(bodyreader)
 
 	return resp, nil
 }

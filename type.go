@@ -1,26 +1,19 @@
 package tapol
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
+	"strings"
 )
 
 type (
-	HTTPHeader string
-	Header     map[HTTPHeader]string
+	Header map[string]string
 )
 
-var (
-	Host          HTTPHeader = "Host"
-	Connection    HTTPHeader = "Connection"
-	Accept        HTTPHeader = "Accept"
-	ContentLength HTTPHeader = "Content-Length"
-	ContentType   HTTPHeader = "Content-Type"
-	Location      HTTPHeader = "Location"
-)
-
-func (h *Header) Add(key HTTPHeader, value string) (err error) {
+func (h *Header) Add(key string, value string) (err error) {
 	if value == "" {
 		return errors.New("the value cannot be null")
 	}
@@ -34,7 +27,7 @@ func (h *Header) Add(key HTTPHeader, value string) (err error) {
 	return nil
 }
 
-func (h *Header) change(key HTTPHeader, value string) (err error) {
+func (h *Header) change(key string, value string) (err error) {
 	if value == "" {
 		return errors.New("the value cannot be null")
 	}
@@ -44,11 +37,11 @@ func (h *Header) change(key HTTPHeader, value string) (err error) {
 	return nil
 }
 
-func (h *Header) exists(key HTTPHeader) (exists bool) {
+func (h *Header) exists(key string) (exists bool) {
 	return (*h)[key] != ""
 }
 
-func (h *Header) Get(key HTTPHeader) string {
+func (h *Header) Get(key string) string {
 	return (*h)[key]
 }
 
@@ -102,4 +95,56 @@ type Response struct {
 	Header     Header
 	Body       io.ReadCloser
 	Ok         bool
+}
+
+type chunkedReader struct {
+	r      *bufio.Reader
+	remain int
+	done   bool
+}
+
+func (c *chunkedReader) Read(p []byte) (n int, err error) {
+	if c.done {
+		return 0, io.EOF
+	}
+
+	if c.remain == 0 {
+		line, err := c.r.ReadString('\n')
+		if err != nil {
+			return 0, err
+		}
+
+		line = strings.TrimSpace(line)
+
+		length, err := strconv.ParseInt(line, 16, 64)
+		if err != nil {
+			return 0, err
+		}
+
+		if length == 0 {
+			c.done = true
+			c.r.ReadString('\n')
+			return 0, io.EOF
+		}
+
+		c.remain = int(length)
+	}
+
+	toRead := min(len(p), c.remain)
+
+	n, err = c.r.Read(p[:toRead])
+	if err != nil {
+		return 0, err
+	}
+
+	c.remain -= n
+
+	if c.remain == 0 {
+		_, err := c.r.ReadString('\n')
+		if err != nil {
+			return 0, err
+		}
+	}
+
+	return n, nil
 }
