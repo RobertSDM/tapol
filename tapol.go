@@ -3,6 +3,7 @@ package tapol
 import (
 	"bufio"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,12 +12,14 @@ import (
 	"strings"
 )
 
+// Returns a new chukedReader
 func newChunkedReader(r *bufio.Reader) *chunkedReader {
 	return &chunkedReader{
 		r: r,
 	}
 }
 
+// Returns a stablished conn with the server, using or not using TLS
 func createConn(schema, url string) (conn net.Conn, err error) {
 	if schema == "http" {
 		conn, err = connect(url)
@@ -31,6 +34,7 @@ func createConn(schema, url string) (conn net.Conn, err error) {
 	return conn, nil
 }
 
+// Extract the necessary information from the URL
 func parseURL(rawURL string) (schema, host, path string, err error) {
 	parsedURL, err := url.Parse(rawURL)
 	if err != nil {
@@ -57,6 +61,7 @@ func parseURL(rawURL string) (schema, host, path string, err error) {
 	return schema, host, path, nil
 }
 
+// Add the necessary headers to the request [Header], subscribing if the headers are already set
 func buildHeader(header *Header, host string, body *strings.Reader) *Header {
 	header.change("Host", host)
 	header.change("Connection", "close")
@@ -68,9 +73,10 @@ func buildHeader(header *Header, host string, body *strings.Reader) *Header {
 	return header
 }
 
+// Reads the headers content and parses it to a [Header] map
 func parseRespHeader(reader *bufio.Reader) (resp Response, err error) {
 	resp = Response{}
-	resp.Header = Header{}
+	resp.Header = &Header{}
 
 	line, _ := reader.ReadString('\n')
 	line = strings.TrimSpace(line)
@@ -109,6 +115,9 @@ func parseRespHeader(reader *bufio.Reader) (resp Response, err error) {
 	return resp, nil
 }
 
+// The HTTP client entry point and logic holder
+//
+// Makes the request and return the response from the server
 func makeRequest(method string, rawURL string, header *Header, body *strings.Reader) (resp Response, err error) {
 	schema, host, path, err := parseURL(rawURL)
 	if err != nil {
@@ -129,20 +138,28 @@ func makeRequest(method string, rawURL string, header *Header, body *strings.Rea
 		Body:   body,
 	}
 
+	// Sending the request
 	fmt.Fprintln(conn, request.Build())
 
 	reader := bufio.NewReader(conn)
 	resp, err = parseRespHeader(reader)
 	if err != nil {
-		return resp, err
+		return Response{}, err
 	}
 
-	// A redirection of any status 3xx will lead in another request for now
+	// Any status of 3xx will lead into other request being made to the Location header
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
-		return makeRequest(method, resp.Header.Get("Location"), header, body)
+		location := resp.Header.Get("Location")
+
+		if location == "" {
+			return resp, errors.New("the request was redirected, but no valid \"Location\" header were provided")
+		}
+
+		return makeRequest(method, location, header, body)
 	}
 
 	var bodyreader io.Reader = reader
+
 	contentlength := resp.Header.Get("Content-Length")
 	transferencoding := resp.Header.Get("Transfer-Encoding")
 
@@ -156,10 +173,10 @@ func makeRequest(method string, rawURL string, header *Header, body *strings.Rea
 	} else if contentlength != "" && transferencoding == "" {
 		bodylength, err := strconv.Atoi(contentlength)
 		if err != nil {
-			bodyreader = strings.NewReader("")
-			resp.Body = io.NopCloser(bodyreader)
-			return resp, nil
+			resp.Body = io.NopCloser(strings.NewReader(""))
+			return resp, errors.New("the server didn't provided a valid \"Content-Length\" header")
 		}
+
 		bodyreader = io.LimitReader(reader, int64(bodylength))
 	}
 	resp.Body = io.NopCloser(bodyreader)
@@ -167,22 +184,30 @@ func makeRequest(method string, rawURL string, header *Header, body *strings.Rea
 	return resp, nil
 }
 
+// GET request
 func Get(url string, header *Header) (resp Response, err error) {
 	return makeRequest("GET", url, header, nil)
 }
 
+// POST request
 func Post(url string, header *Header, body *strings.Reader) (resp Response, err error) {
 	return makeRequest("POST", url, header, body)
 }
 
+// PUT request
 func Put(url string, header *Header, body *strings.Reader) (resp Response, err error) {
 	return makeRequest("PUT", url, header, body)
 }
 
+// DELETE request
 func Delete(url string, header *Header) (resp Response, err error) {
 	return makeRequest("DELETE", url, header, nil)
 }
 
+// Create a [net.Conn] using the [tls] package for the
+// TLS handshake
+// 
+// Used in HTTPS connections
 func connectTLS(host string) (net.Conn, error) {
 	conn, err := tls.Dial("tcp", host, &tls.Config{})
 	if err != nil {
@@ -192,6 +217,9 @@ func connectTLS(host string) (net.Conn, error) {
 	return conn, nil
 }
 
+// Create a [net.Conn] using only the TCP handshake
+//
+// Used in HTTP connections
 func connect(host string) (net.Conn, error) {
 	conn, err := net.Dial("tcp", host)
 	if err != nil {
