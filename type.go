@@ -58,7 +58,7 @@ func (h Header) String() string {
 var HTTPversion = "1.1"
 
 type Request struct {
-	Body   []byte
+	Body   *strings.Reader
 	Host   string
 	Header *Header
 	Path   string
@@ -80,7 +80,9 @@ func (r *Request) Build() (request string) {
 		return HTTPFormedRequest
 	}
 
-	HTTPFormedRequest += fmt.Sprintf("\r\n%s\r\n", r.Body)
+	b, _ := io.ReadAll(r.Body)
+
+	HTTPFormedRequest += fmt.Sprintf("\r\n%s\r\n", string(b))
 
 	return HTTPFormedRequest
 }

@@ -11,10 +11,9 @@ import (
 	"strings"
 )
 
-
-func newChunkedReader(r io.Reader) *chunkedReader {
+func newChunkedReader(r *bufio.Reader) *chunkedReader {
 	return &chunkedReader{
-		r: bufio.NewReader(r),
+		r: r,
 	}
 }
 
@@ -58,12 +57,12 @@ func parseURL(rawURL string) (schema, host, path string, err error) {
 	return schema, host, path, nil
 }
 
-func buildHeader(header *Header, host string, body []byte) *Header {
+func buildHeader(header *Header, host string, body *strings.Reader) *Header {
 	header.change("Host", host)
 	header.change("Connection", "close")
 
 	if body != nil {
-		header.change("Content-Length", fmt.Sprint(len(body)))
+		header.change("Content-Length", fmt.Sprint(body.Len()))
 	}
 
 	return header
@@ -110,7 +109,7 @@ func parseRespHeader(reader *bufio.Reader) (resp Response, err error) {
 	return resp, nil
 }
 
-func makeRequest(method string, rawURL string, header *Header, body []byte) (resp Response, err error) {
+func makeRequest(method string, rawURL string, header *Header, body *strings.Reader) (resp Response, err error) {
 	schema, host, path, err := parseURL(rawURL)
 	if err != nil {
 		return Response{}, err
@@ -127,6 +126,7 @@ func makeRequest(method string, rawURL string, header *Header, body []byte) (res
 		Header: buildHeader(header, host, body),
 		Method: method,
 		Path:   path,
+		Body:   body,
 	}
 
 	fmt.Fprintln(conn, request.Build())
@@ -142,26 +142,25 @@ func makeRequest(method string, rawURL string, header *Header, body []byte) (res
 		return makeRequest(method, resp.Header.Get("Location"), header, body)
 	}
 
-	var bodyreader io.Reader
+	var bodyreader io.Reader = reader
 	contentlength := resp.Header.Get("Content-Length")
-	transfercontent := resp.Header.Get("Transfer-Encoding")
+	transferencoding := resp.Header.Get("Transfer-Encoding")
 
-	if contentlength == "" && transfercontent != "" {
-		bodyreader = conn
+	switch transferencoding {
+	case "chunked":
+		bodyreader = newChunkedReader(reader)
+	}
 
-		switch transfercontent {
-		case "chunked":
-			bodyreader = newChunkedReader(bodyreader)
-		}
-
-	} else if contentlength == "" && transfercontent == "" {
+	if contentlength == "" && transferencoding == "" {
 		bodyreader = strings.NewReader("")
-	} else if contentlength != "" && transfercontent == "" {
+	} else if contentlength != "" && transferencoding == "" {
 		bodylength, err := strconv.Atoi(contentlength)
 		if err != nil {
-			return Response{}, err
+			bodyreader = strings.NewReader("")
+			resp.Body = io.NopCloser(bodyreader)
+			return resp, nil
 		}
-		bodyreader = io.LimitReader(bufio.NewReader(reader), int64(bodylength))
+		bodyreader = io.LimitReader(reader, int64(bodylength))
 	}
 	resp.Body = io.NopCloser(bodyreader)
 
@@ -172,11 +171,11 @@ func Get(url string, header *Header) (resp Response, err error) {
 	return makeRequest("GET", url, header, nil)
 }
 
-func Post(url string, header *Header, body []byte) (resp Response, err error) {
+func Post(url string, header *Header, body *strings.Reader) (resp Response, err error) {
 	return makeRequest("POST", url, header, body)
 }
 
-func Put(url string, header *Header, body []byte) (resp Response, err error) {
+func Put(url string, header *Header, body *strings.Reader) (resp Response, err error) {
 	return makeRequest("PUT", url, header, body)
 }
 
